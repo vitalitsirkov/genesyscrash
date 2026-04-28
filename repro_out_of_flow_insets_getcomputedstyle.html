@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Repro: OOF getComputedStyle vs empty GetLayoutResults</title>
+  <style>
+    body { font: 14px/1.4 system-ui, sans-serif; max-width: 56rem; margin: 1.5rem; }
+    pre { background: #f4f4f4; padding: 0.75rem; overflow: auto; }
+    .warn { color: #8a4b00; }
+    .ok { color: #0a5; }
+    h2 { font-size: 1rem; margin: 1.2rem 0 0.4rem; }
+  </style>
+</head>
+<body>
+  <h1>Repro: out-of-flow <code>getComputedStyle</code> insets (Blink)</h1>
+  <p>
+    This page exercises <code>ValueForPositionOffset</code> for
+    <strong>out-of-flow</strong> boxes using inset values that require reading
+    layout results (<code>LayoutBox::OutOfFlowInsetsForGetComputedStyle</code> in
+    an unpatched build). A crash or CHECK failure on empty
+    <code>GetLayoutResults()</code> is timing- and state-dependent; it may not
+    trigger every time. Use the unpatched binary and check the console.
+  </p>
+  <p class="warn">
+    If your build already guards with <code>!GetLayoutResults().empty()</code>,
+    this page should only log results, not crash.
+  </p>
+
+  <h2>Why these cases</h2>
+  <ul>
+    <li>
+      <code>position: absolute|fixed</code> with
+      <strong>non-trivial</strong> insets (e.g. <code>left: 10%</code>, or
+      <code>left: 10px</code> with anchor / position-fallback) goes through the
+      OOF used-inset path, not the early “fixed length, no position fallback”
+      shortcut.
+    </li>
+    <li>
+      A fragment-less <code>LayoutBox</code> (no entries in
+      <code>GetLayoutResults()</code>) used to make that path hit
+      <code>CHECK</code> / <code>.front()</code> on an empty vector.
+    </li>
+  </ul>
+
+  <div id="host" style="position: relative; width: 200px; height: 80px; border: 1px solid #999;"></div>
+  <pre id="log"></pre>
+
+  <script>
+    const logEl = document.getElementById('log');
+    function log(msg) {
+      logEl.textContent += msg + '\n';
+      console.log(msg);
+    }
+
+    function readOOFInsets(label, el) {
+      const cs = getComputedStyle(el);
+      const o = {
+        left: cs.left,
+        top: cs.top,
+        right: cs.right,
+        bottom: cs.bottom,
+        position: cs.position
+      };
+      log(label + ' => ' + JSON.stringify(o));
+    }
+
+    // --- 1) Percent insets on OOF (must use layout-stored insets in classic path) ---
+    (function() {
+      const a = document.createElement('div');
+      a.id = 'abs-pct';
+      a.style.cssText = 'position:absolute;left:10%;top:0;width:20px;height:20px;background:#c00;';
+      document.getElementById('host').appendChild(a);
+      readOOFInsets('1) after append: abs + %', a);
+    })();
+
+    // --- 2) Create, style, append, read in same turn (before rAF) ---
+    (function() {
+      const a = document.createElement('div');
+      a.style.cssText = 'position:absolute;left:20%;top:30px;width:10px;height:10px;background:#0a0;';
+      document.getElementById('host').appendChild(a);
+      readOOFInsets('2) same synchronous turn', a);
+    })();
+
+    // --- 3) display:none container: child still exists in DOM after layout toggles ---
+    (function() {
+      const wrap = document.createElement('div');
+      wrap.style.display = 'none';
+      const a = document.createElement('div');
+      a.style.cssText = 'position:absolute;left:15%;top:5px;width:10px;height:10px;background:#00a;';
+      wrap.appendChild(a);
+      document.body.appendChild(wrap);
+      readOOFInsets('3) child under display:none parent', a);
+      wrap.style.display = 'block';
+      readOOFInsets('3b) after parent display:none -> block', a);
+    })();
+
+    // --- 4) content-visibility (may skip layout for offscreen content in some cases) ---
+    (function() {
+      const cv = document.createElement('div');
+      cv.style.cssText = 'content-visibility:auto;contain-intrinsic-size:100px;position:relative;height:200px;';
+      const a = document.createElement('div');
+      a.style.cssText = 'position:absolute;left:12%;top:0;width:8px;height:8px;background:#a0a;';
+      cv.appendChild(a);
+      document.body.appendChild(cv);
+      readOOFInsets('4) under content-visibility:auto', a);
+    })();
+
+    // --- 5) Next frame and after load ---
+    requestAnimationFrame(function() {
+      const el = document.getElementById('abs-pct');
+      if (el) readOOFInsets('5) rAF: abs + %', el);
+    });
+    window.addEventListener('load', function() {
+      const el = document.getElementById('abs-pct');
+      if (el) readOOFInsets('6) window load: abs + %', el);
+    });
+
+    // --- 6) Stress: many insert/read cycles (uncomment to try heavy repro) ---
+    const STRESS = false;
+    if (STRESS) {
+      const host = document.getElementById('host');
+      for (let i = 0; i < 5000; i++) {
+        const a = document.createElement('div');
+        a.style.cssText = 'position:absolute;left:' + (5 + (i % 30)) + '%;top:1px;width:1px;height:1px;';
+        host.appendChild(a);
+        void getComputedStyle(a).left;
+        host.removeChild(a);
+      }
+      log('Stress loop done');
+    }
+
+    log('--- done (sync) ---');
+  </script>
+</body>
+</html>
