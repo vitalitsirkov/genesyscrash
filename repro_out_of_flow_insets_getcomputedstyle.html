@@ -2,143 +2,319 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Repro: OOF getComputedStyle crash (CEF UpdateStyleForbiddenScope)</title>
+  <title>Repro: OOF getComputedStyle crash — CEF 6367</title>
   <style>
-    body { font: 14px/1.4 system-ui, sans-serif; max-width: 56rem; margin: 1.5rem; }
-    pre  { background: #f4f4f4; padding: 0.75rem; overflow: auto; max-height: 20rem; }
-    .warn { color: #8a4b00; background: #fff8e1; padding: 0.5rem; border-left: 3px solid #f0a000; }
-    .ok   { color: #0a5; }
-    .err  { color: #b00; font-weight: 600; }
-    code  { background: #f0f0f0; padding: 0 3px; border-radius: 2px; }
-    h2 { font-size: 1rem; margin: 1.2rem 0 0.4rem; }
-    #container { position: relative; width: 300px; height: 200px; border: 1px solid #ccc; background: #fafafa; }
-    #oof-auto   { position: absolute; top: auto; left: auto; width: 40px; height: 40px; background: hotpink; opacity: .7; }
-    #oof-pct    { position: absolute; top: 50%;  left: 50%;  width: 40px; height: 40px; background: deepskyblue; opacity: .7; }
+    body { font: 14px/1.5 system-ui, sans-serif; max-width: 58rem; margin: 1.5rem; }
+    h2   { font-size: 1rem; margin: 1.4rem 0 .3rem; }
+    pre  { background: #f4f4f4; padding: .6rem; overflow: auto; max-height: 14rem; font-size: 12px; }
+    .box { border: 1px solid #ccc; padding: .4rem; margin: .4rem 0; }
+    .ok  { color: #080; }
+    .err { color: #b00; font-weight: 600; }
+    code { background: #eee; padding: 0 2px; border-radius: 2px; }
+    #log { border: 1px solid #ccc; padding: .4rem; min-height: 3rem; background: #fafafa; }
   </style>
 </head>
 <body>
-  <h1>Repro: OOF <code>getComputedStyle</code> crash</h1>
 
-  <p class="warn">
-    <strong>This crash requires the CEF-specific
-    <code>UpdateStyleForbiddenScope</code> to be active.</strong>
-    It cannot be reproduced by opening this page in a plain browser.
-    Load this page inside the CEF 6367 build (without the fix) while the
-    composition tick is running — i.e. after the page is registered with the
-    layout tree but before the first paint has committed.
-  </p>
+<h1>Repro: <code>CHECK(!layout_results.empty())</code> in <code>OutOfFlowInsetsForGetComputedStyle</code></h1>
 
-  <h2>Root cause</h2>
-  <p>
-    CEF's <code>LayoutTreeScheduler::OnCompositionStarted()</code>
-    (<code>layout_tree_scheduler.cc:187</code>) enters
-    <code>UpdateStyleForbiddenScope</code>, which patches
-    <code>Document::UpdateStyleAndLayout()</code> to return early:
-  </p>
-  <pre>// document.cc (patched by CEF)
-void Document::UpdateStyleAndLayout(DocumentUpdateReason reason) {
-  ...
-  if (UpdateStyleForbiddenScope::IsUpdateStyleForbidden())
-    return;          // ← layout never runs inside a composition tick
-  ...</pre>
-  <p>
-    When page JS calls <code>getComputedStyle(el).top</code> on an
-    out-of-flow–positioned element while a composition tick is in progress
-    (e.g. from a <code>MutationObserver</code>, a layout-tree event callback,
-    or simply an element inserted just before a tick fires), the call chain is:
-  </p>
-  <pre>getComputedStyle(el).top
-  → CSSComputedStyleDeclaration::GetPropertyCSSValue("top")
-    → UpdateStyleAndLayoutIfNeeded()         // IsLayoutDependent → true
-      → Document::UpdateStyleAndLayoutForNode()
-        → Document::UpdateStyleAndLayout()
-          → <strong>returns early (UpdateStyleForbiddenScope)</strong>
-    → Bottom/Top::CSSValueFromComputedStyleInternal()
-      → ComputedStyleUtils::ValueForPositionOffset()
-        // offset is 'auto' or '%' → IsFixed() is false → no early-return at line 807
-        if (box && box->IsOutOfFlowPositioned())  // ← TRUE (element is abspos)
-          box->OutOfFlowInsetsForGetComputedStyle()
-            CHECK(!layout_results.empty())  // ← CRASH: box never laid out</pre>
+<pre id="log">Running patterns…
+</pre>
 
-  <h2>Trigger conditions (both required)</h2>
-  <ol>
-    <li>
-      <strong>UpdateStyleForbiddenScope is held</strong> — happens inside CEF's
-      composition tick (<code>LayoutTreeScheduler::OnCompositionStarted</code>),
-      <code>VRMHelper::GetElementLeftAndTop</code>,
-      <code>BlinkHelper::GetElementPositionFromViewPortById</code>, and several
-      other CEF helpers.
-    </li>
-    <li>
-      <strong>OOF element has non-fixed inset</strong> — <code>top: auto</code>,
-      <code>top: 50%</code>, <code>top: calc(...)</code>, etc. A fixed value
-      like <code>top: 10px</code> takes an early-return at line 807 and never
-      reaches <code>OutOfFlowInsetsForGetComputedStyle()</code>.
-    </li>
-  </ol>
+<!-- ════════════════════════════════════════════════════════════
+     PATTERN 1: inline script, OOF directly in body, non-fixed inset
+     This is the simplest possible case. Runs inline (during parsing)
+     before any paint has committed.
+     ════════════════════════════════════════════════════════════ -->
+<div id="p1" style="position:absolute; top:50%; left:50%; width:60px; height:60px; background:hotpink; z-index:1;"></div>
+<script>
+(function() {
+  try {
+    var cs = getComputedStyle(document.getElementById('p1'));
+    log.textContent += 'P1 OK: top=' + cs.top + ' left=' + cs.left + '\n';
+  } catch(e) { log.textContent += 'P1 CRASH: ' + e + '\n'; }
+})();
+</script>
 
-  <h2>Minimal page content that triggers the crash</h2>
-  <p>
-    Any page that has an absolutely-positioned element with a non-fixed
-    <code>top</code>/<code>left</code> and calls <code>getComputedStyle</code>
-    on it (directly or via a framework) during a composition tick.
-    The element just needs to exist — it doesn't matter if it was inserted
-    before or after the last paint.
-  </p>
+<!-- ════════════════════════════════════════════════════════════
+     PATTERN 2: position:fixed, top:50%, left:50% (WhatsApp spinner)
+     Exactly the CSS pattern used by WhatsApp's loading spinner.
+     ════════════════════════════════════════════════════════════ -->
+<div id="p2" style="position:fixed; top:50%; left:50%; width:50px; height:50px; background:deepskyblue; z-index:2;"></div>
+<script>
+(function() {
+  try {
+    var cs = getComputedStyle(document.getElementById('p2'));
+    log.textContent += 'P2 OK (fixed top:50%): top=' + cs.top + ' left=' + cs.left + '\n';
+  } catch(e) { log.textContent += 'P2 CRASH: ' + e + '\n'; }
+})();
+</script>
 
-  <div id="container">
-    <div id="oof-auto">auto</div>
-    <div id="oof-pct">50%</div>
+<!-- ════════════════════════════════════════════════════════════
+     PATTERN 3: OOF inside CSS Grid (grid intrinsic sizing passes can
+     temporarily leave OOF children with empty layout_results_)
+     ════════════════════════════════════════════════════════════ -->
+<div id="p3-grid" style="display:grid; grid-template-columns:1fr 1fr; position:relative; width:300px; height:200px; background:#eee;">
+  <div id="p3" style="position:absolute; top:calc(50% - 20px); left:calc(50% - 20px); width:40px; height:40px; background:orange;"></div>
+</div>
+<script>
+(function() {
+  try {
+    var cs = getComputedStyle(document.getElementById('p3'));
+    log.textContent += 'P3 OK (in grid, top:calc): top=' + cs.top + ' left=' + cs.left + '\n';
+  } catch(e) { log.textContent += 'P3 CRASH: ' + e + '\n'; }
+})();
+</script>
+
+<!-- ════════════════════════════════════════════════════════════
+     PATTERN 4: multicol + nested OOF (from WPT test for crbug/1473508)
+     ════════════════════════════════════════════════════════════ -->
+<style>
+  html { column-count: 2; }
+  /* reset below to avoid breaking the rest of the page */
+</style>
+<div id="p4-mc" style="column-count:2; position:absolute; width:300px; background:#ffe;">
+  <svg xmlns="http://www.w3.org/2000/svg"></svg>
+  <div style="transform:scale(1)">
+    <ruby style="position:absolute"><rt>foo</rt></ruby>
   </div>
+</div>
+<style>html { column-count: unset; }</style>
+<script>
+(function() {
+  try {
+    var cs = getComputedStyle(document.getElementById('p4-mc'));
+    log.textContent += 'P4 OK (multicol abspos): right=' + cs.right + '\n';
+  } catch(e) { log.textContent += 'P4 CRASH: ' + e + '\n'; }
+})();
+</script>
 
-  <h2>Live probe (safe in plain browser — layout is NOT forbidden here)</h2>
-  <pre id="log"></pre>
-  <script>
-    var log = document.getElementById('log');
-    function emit(msg, cls) {
-      var s = document.createElement('span');
-      if (cls) s.className = cls;
-      s.textContent = msg + '\n';
-      log.appendChild(s);
-    }
+<!-- ════════════════════════════════════════════════════════════
+     PATTERN 5: display:none → display:block, position:fixed — simulate
+     WhatsApp showing its loading overlay from hidden state.
+     Re-creates the LayoutBox (starts with empty layout_results_).
+     ════════════════════════════════════════════════════════════ -->
+<div id="p5" style="display:none; position:fixed; top:50%; left:50%; width:60px; height:60px; background:gold; z-index:3;"></div>
+<script>
+(function() {
+  var el = document.getElementById('p5');
+  el.style.display = 'block'; // new LayoutBox, layout_results_ is empty
+  try {
+    var cs = getComputedStyle(el);
+    log.textContent += 'P5 OK (display:none→block, fixed top:50%): top=' + cs.top + ' left=' + cs.left + '\n';
+  } catch(e) { log.textContent += 'P5 CRASH: ' + e + '\n'; }
+})();
+</script>
 
-    // In a plain browser this will succeed because UpdateStyleAndLayout runs normally.
-    // In CEF with UpdateStyleForbiddenScope held, the layout is skipped and
-    // GetLayoutResults() is empty → crash in the unpatched build.
+<!-- ════════════════════════════════════════════════════════════
+     PATTERN 6: logical inset properties on OOF (crbug/1478578)
+     insetInlineStart / insetBlockStart are layout-dependent in this
+     build, but may reach OutOfFlowInsetsForGetComputedStyle through
+     a different code path if the element has not been laid out.
+     ════════════════════════════════════════════════════════════ -->
+<div id="p6" style="position:absolute; inset-block-start:30%; inset-inline-start:20%;
+                    width:40px; height:40px; background:orchid;"></div>
+<script>
+(function() {
+  var el = document.getElementById('p6');
+  try {
+    var cs = getComputedStyle(el);
+    log.textContent += 'P6 OK (logical insets, insetBlockStart:30%): '
+      + 'insetBlockStart=' + cs.insetBlockStart + ' insetInlineStart=' + cs.insetInlineStart + '\n';
+  } catch(e) { log.textContent += 'P6 CRASH: ' + e + '\n'; }
+})();
+</script>
+
+<!-- ════════════════════════════════════════════════════════════
+     PATTERN 7: OOF child of contain:layout (CSS containment may
+     defer OOF layout until explicit flush; inline query crashes).
+     ════════════════════════════════════════════════════════════ -->
+<div style="contain:layout; position:relative; width:200px; height:150px; background:#f0ffe0;">
+  <div id="p7" style="position:absolute; top:33%; left:25%; width:50px; height:50px; background:tomato;"></div>
+</div>
+<script>
+(function() {
+  try {
+    var cs = getComputedStyle(document.getElementById('p7'));
+    log.textContent += 'P7 OK (contain:layout, top:33%): top=' + cs.top + '\n';
+  } catch(e) { log.textContent += 'P7 CRASH: ' + e + '\n'; }
+})();
+</script>
+
+<!-- ════════════════════════════════════════════════════════════
+     PATTERN 8: subtree layout invalidation (crbug/1458561)
+     Force layout → dirty OOF content → query .top inline
+     ════════════════════════════════════════════════════════════ -->
+<div style="position:relative; width:100px; height:100px; background:lime;">
+  <div id="p8" style="position:absolute; top:0; left:0; width:30px; height:30px; overflow:hidden; background:hotpink;">hi</div>
+</div>
+<script>
+(function() {
+  try {
+    document.body.offsetTop;            // force full layout
+    document.getElementById('p8').innerText = 'boom';  // dirty OOF subtree
+    var cs = getComputedStyle(document.getElementById('p8'));
+    log.textContent += 'P8 OK (subtree layout, top:0): top=' + cs.top + '\n';
+  } catch(e) { log.textContent += 'P8 CRASH: ' + e + '\n'; }
+})();
+</script>
+
+<!-- ════════════════════════════════════════════════════════════
+     PATTERN 9: position:fixed inside a CSS transform container
+     (creates a new containing block, affects OOF layout path)
+     ════════════════════════════════════════════════════════════ -->
+<div style="transform:translateZ(0); width:300px; height:200px; background:#e0f0ff; position:relative;">
+  <div id="p9" style="position:fixed; top:auto; left:auto; width:50px; height:50px; background:mediumseagreen;"></div>
+</div>
+<script>
+(function() {
+  try {
+    var cs = getComputedStyle(document.getElementById('p9'));
+    log.textContent += 'P9 OK (fixed in transform container, top:auto): top=' + cs.top + '\n';
+  } catch(e) { log.textContent += 'P9 CRASH: ' + e + '\n'; }
+})();
+</script>
+
+<!-- ════════════════════════════════════════════════════════════
+     PATTERN 10: dynamic createElement + appendChild + getComputedStyle
+     all in the same microtask, to maximum reduce layout opportunity.
+     ════════════════════════════════════════════════════════════ -->
+<script>
+(function() {
+  var wrapper = document.createElement('div');
+  wrapper.style.cssText = 'position:relative; width:300px; height:200px;';
+  document.body.appendChild(wrapper);
+
+  // Test A: position:absolute, top:50%
+  var a = document.createElement('div');
+  a.style.cssText = 'position:absolute; top:50%; left:25%; width:40px; height:40px; background:salmon;';
+  wrapper.appendChild(a);
+  try {
+    var cs = getComputedStyle(a);
+    log.textContent += 'P10a OK (dynamic abspos top:50%): top=' + cs.top + '\n';
+  } catch(e) { log.textContent += 'P10a CRASH: ' + e + '\n'; }
+
+  // Test B: position:fixed, top:50%
+  var b = document.createElement('div');
+  b.style.cssText = 'position:fixed; top:50%; left:25%; width:40px; height:40px; background:peru; z-index:5;';
+  document.body.appendChild(b);
+  try {
+    var cs2 = getComputedStyle(b);
+    log.textContent += 'P10b OK (dynamic fixed top:50%): top=' + cs2.top + '\n';
+  } catch(e) { log.textContent += 'P10b CRASH: ' + e + '\n'; }
+
+  // Test C: inset shorthand
+  var c = document.createElement('div');
+  c.style.cssText = 'position:absolute; inset:50% auto auto 50%; width:40px; height:40px; background:mediumpurple;';
+  wrapper.appendChild(c);
+  try {
+    var cs3 = getComputedStyle(c);
+    log.textContent += 'P10c OK (dynamic inset shorthand): top=' + cs3.top + '\n';
+  } catch(e) { log.textContent += 'P10c CRASH: ' + e + '\n'; }
+})();
+</script>
+
+<!-- ════════════════════════════════════════════════════════════
+     PATTERN 11: rAF – most likely to coincide with CEF composition
+     tick timing window. Insert OOF → read getComputedStyle in rAF.
+     ════════════════════════════════════════════════════════════ -->
+<script>
+requestAnimationFrame(function raf1() {
+  var el = document.createElement('div');
+  el.style.cssText = 'position:fixed; top:50%; left:50%; width:48px; height:48px; '
+                   + 'background:darkorange; z-index:10; transform:translate(-50%,-50%);';
+  document.body.appendChild(el);
+  try {
+    var cs = getComputedStyle(el);
+    log.textContent += 'P11 OK (rAF fixed top:50%): top=' + cs.top + ' left=' + cs.left + '\n';
+  } catch(e) { log.textContent += 'P11 CRASH: ' + e + '\n'; }
+});
+
+// Nested rAF (2nd frame) — even more likely to hit the composition tick window
+requestAnimationFrame(function() {
+  requestAnimationFrame(function raf2() {
+    var el = document.createElement('div');
+    el.style.cssText = 'position:fixed; top:50%; left:50%; width:48px; height:48px; '
+                     + 'background:crimson; z-index:11; transform:translate(-50%,-50%);';
+    document.body.appendChild(el);
     try {
-      var cs1 = getComputedStyle(document.getElementById('oof-auto'));
-      emit('[oof-auto] top=' + cs1.top + ' left=' + cs1.left, 'ok');
-    } catch(e) {
-      emit('[oof-auto] THREW: ' + e, 'err');
-    }
+      var cs = getComputedStyle(el);
+      log.textContent += 'P11b OK (nested rAF fixed top:50%): top=' + cs.top + ' left=' + cs.left + '\n';
+    } catch(e) { log.textContent += 'P11b CRASH: ' + e + '\n'; }
+    log.textContent += '— done —\n';
+  });
+});
+</script>
 
-    try {
-      var cs2 = getComputedStyle(document.getElementById('oof-pct'));
-      emit('[oof-pct] top=' + cs2.top + ' left=' + cs2.left, 'ok');
-    } catch(e) {
-      emit('[oof-pct] THREW: ' + e, 'err');
-    }
+<!-- ════════════════════════════════════════════════════════════
+     CRASH ANALYSIS
+     ════════════════════════════════════════════════════════════ -->
+<h2>Crash site</h2>
+<pre>layout_box.cc:4385
+const BoxStrut& LayoutBox::OutOfFlowInsetsForGetComputedStyle() const {
+  const auto& layout_results = GetLayoutResults();
+  CHECK(!layout_results.empty());   // ← CRASH: element never laid out
+  ...
+  return layout_results.front()->OutOfFlowInsetsForGetComputedStyle();
+}</pre>
 
-    // Simulate what happens when the layout is suppressed:
-    // Insert a new OOF element and immediately read its computed top
-    // without any layout flush. In a plain browser UpdateStyleAndLayout
-    // *will* run so this won't crash. But it demonstrates the code path.
-    var rel = document.createElement('div');
-    rel.style.cssText = 'position:relative;width:300px;height:200px;';
-    document.body.appendChild(rel);
+<h2>Fix (computed_style_utils.cc:811)</h2>
+<pre>// BEFORE (unpatched):
+if (box && box->IsOutOfFlowPositioned()) {
+    const PhysicalBoxStrut& insets =
+        box->OutOfFlowInsetsForGetComputedStyle()...   // ← crashes if empty
 
-    var fresh = document.createElement('div');
-    fresh.style.cssText = 'position:absolute;top:50%;left:50%;width:40px;height:40px;background:orange;';
-    rel.appendChild(fresh);
+// AFTER (patched):
+if (box && box->IsOutOfFlowPositioned() && !box->GetLayoutResults().empty()) {
+    const PhysicalBoxStrut& insets =
+        box->OutOfFlowInsetsForGetComputedStyle()...   // ← safe</pre>
 
-    try {
-      var cs3 = getComputedStyle(fresh);
-      emit('[fresh oof, % insets] top=' + cs3.top + ' left=' + cs3.left, 'ok');
-    } catch(e) {
-      emit('[fresh oof, % insets] THREW: ' + e, 'err');
-    }
+<h2>Required conditions for the crash</h2>
+<pre>1. box-&gt;IsOutOfFlowPositioned() == true
+      (element has position:absolute, position:fixed, or is OOF in multicol)
 
-    emit('Done — no crash in plain browser (layout runs normally here).');
-  </script>
+2. offset.IsFixed() == false
+      (top/left/right/bottom value is: auto, %, calc(), or anchor())
+      (a plain px value like "top:10px" returns early at line 807)
+
+3. box-&gt;GetLayoutResults().empty() == true
+      The LayoutBox was never given a layout result. This happens when:
+      a) Document::UpdateStyleAndLayout() returned early before running layout.
+         In CEF 6367, UpdateStyleAndLayoutTree() and UpdateStyleAndLayout()
+         both return early when UpdateStyleForbiddenScope::IsUpdateStyleForbidden().
+         This scope is entered by:
+           • LayoutTreeScheduler::OnCompositionStarted()
+           • BlinkHelper::GetElementPositionFromViewPortById()
+           • BlinkHelper::GetOverlayingElementsById()
+           • BlinkHelper::GetAbsoluteDeltasFromFgid()
+           • VRMHelper::GetElementLeftAndTop()
+           • VRMHelper::GetElementWidthAndHeight()
+         Any of these holding the scope while getComputedStyle().top is called
+         (directly or indirectly by page JS) will trigger the crash.
+      b) The element is newly created (display:none→block or fresh createElement)
+         and no layout cycle has run since.
+
+4. style.MayHavePositionFallbackList() must be false for the fallback path
+   at line 841–844 to be skipped (i.e. the element does NOT use position-try-options).</pre>
+
+<h2>WhatsApp-specific trigger (hypothesis)</h2>
+<pre>WhatsApp Web uses:
+  • position:fixed; top:50%; left:50%   (loading spinner / overlays)
+  • Dynamic show/hide of overlays via display:none ↔ display:block
+  • getComputedStyle() calls for animation calculations
+  • requestAnimationFrame callbacks that coincide with CEF composition ticks
+
+The most likely scenario:
+  1. WhatsApp inserts/shows a position:fixed overlay (new or re-attached LayoutBox)
+  2. A CEF helper (blink_helper / vrm_helper) fires in the same timeframe,
+     entering UpdateStyleForbiddenScope
+  3. WhatsApp JS calls getComputedStyle(overlay).top
+  4. UpdateStyleAndLayout() returns early (scope held) → layout_results_ empty
+  5. ValueForPositionOffset() calls OutOfFlowInsetsForGetComputedStyle()
+  6. CHECK(!layout_results.empty()) fires → crash
+
+NOTE: To get the exact trigger, a CEF crash stack trace is needed.
+      The patterns above cover all known code paths that can reach the CHECK.</pre>
+
 </body>
 </html>
