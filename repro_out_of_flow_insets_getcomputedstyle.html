@@ -5,131 +5,139 @@
   <title>Repro: OOF getComputedStyle vs empty GetLayoutResults</title>
   <style>
     body { font: 14px/1.4 system-ui, sans-serif; max-width: 56rem; margin: 1.5rem; }
-    pre { background: #f4f4f4; padding: 0.75rem; overflow: auto; }
+    pre  { background: #f4f4f4; padding: 0.75rem; overflow: auto; max-height: 22rem; }
     .warn { color: #8a4b00; }
-    .ok { color: #0a5; }
+    .ok   { color: #0a5; }
+    .err  { color: #b00; font-weight: 600; }
     h2 { font-size: 1rem; margin: 1.2rem 0 0.4rem; }
+
+    /* A "display-locked" subtree: layout of children is SKIPPED while
+       the children still have a LayoutBox built from style. This is the
+       sweet spot for the bug: box != null, IsOutOfFlowPositioned() == true,
+       GetLayoutResults().empty() == true. */
+    .locked {
+      content-visibility: hidden;
+      contain: strict;
+      width: 200px;
+      height: 200px;
+    }
+
+    .container { position: relative; width: 200px; height: 200px; border: 1px dashed #999; }
+
+    /* Use a NON-fixed inset so ValueForPositionOffset() does NOT take the
+       early "fixed length, no position-fallback" return path. */
+    .oof-percent { position: absolute; top: 50%;  left: 50%;  width: 30px; height: 30px; background: hotpink; }
+    .oof-auto    { position: absolute; top: auto; left: auto; width: 30px; height: 30px; background: deepskyblue; }
+    .oof-calc    { position: absolute; top: calc(10px + 5%); left: 0; width: 30px; height: 30px; background: orange; }
+
+    /* Fixed insets combined with position-try-fallbacks also bypass the
+       early return (because MayHavePositionFallbackList() is true). */
+    @position-try --flip { top: 100px; left: 100px; }
+    .oof-fixed-with-fallback {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      width: 30px;
+      height: 30px;
+      background: limegreen;
+      position-try-fallbacks: --flip;
+    }
   </style>
 </head>
 <body>
-  <h1>Repro: out-of-flow <code>getComputedStyle</code> insets (Blink)</h1>
+  <h1>Repro: out-of-flow <code>getComputedStyle</code> insets crash</h1>
+
   <p>
-    This page exercises <code>ValueForPositionOffset</code> for
-    <strong>out-of-flow</strong> boxes using inset values that require reading
-    layout results (<code>LayoutBox::OutOfFlowInsetsForGetComputedStyle</code> in
-    an unpatched build). A crash or CHECK failure on empty
-    <code>GetLayoutResults()</code> is timing- and state-dependent; it may not
-    trigger every time. Use the unpatched binary and check the console.
+    Targets <code>blink::ComputedStyleUtils::ValueForPositionOffset</code> in
+    <code>computed_style_utils.cc</code>. Without the
+    <code>!box-&gt;GetLayoutResults().empty()</code> guard, calling
+    <code>OutOfFlowInsetsForGetComputedStyle()</code> on a fragmentless
+    out-of-flow box hits a <code>CHECK</code> (or worse, a UAF on
+    <code>layout_results_.front()</code>) and crashes the renderer.
   </p>
+
   <p class="warn">
-    If your build already guards with <code>!GetLayoutResults().empty()</code>,
-    this page should only log results, not crash.
+    To reach the buggy path the inset query must NOT take the early
+    "fixed length &amp; no position-fallback" shortcut. So we use
+    <code>%</code>, <code>auto</code>, <code>calc()</code>, or fixed +
+    <code>position-try-fallbacks</code>.
   </p>
 
-  <h2>Why these cases</h2>
-  <ul>
-    <li>
-      <code>position: absolute|fixed</code> with
-      <strong>non-trivial</strong> insets (e.g. <code>left: 10%</code>, or
-      <code>left: 10px</code> with anchor / position-fallback) goes through the
-      OOF used-inset path, not the early “fixed length, no position fallback”
-      shortcut.
-    </li>
-    <li>
-      A fragment-less <code>LayoutBox</code> (no entries in
-      <code>GetLayoutResults()</code>) used to make that path hit
-      <code>CHECK</code> / <code>.front()</code> on an empty vector.
-    </li>
-  </ul>
+  <p class="warn">
+    To leave the OOF box with <em>empty</em> <code>GetLayoutResults()</code>
+    we wrap it in <code>content-visibility: hidden</code> (a "display lock"),
+    which keeps the LayoutBox alive but skips its layout — even after a
+    forced layout flush via <code>document.body.offsetTop</code>.
+  </p>
 
-  <div id="host" style="position: relative; width: 200px; height: 80px; border: 1px solid #999;"></div>
+  <h2>Layout</h2>
+
+  <!-- Visible, sanity-check container (should always succeed) -->
+  <div class="container">
+    <div id="ok-pct" class="oof-percent"></div>
+  </div>
+
+  <!-- The crashing cases: each .locked subtree is display-locked, so its
+       absolutely-positioned descendant ends up with no layout result. -->
+  <div class="locked"><div class="container"><div id="bad-pct"            class="oof-percent"></div></div></div>
+  <div class="locked"><div class="container"><div id="bad-auto"           class="oof-auto"></div></div></div>
+  <div class="locked"><div class="container"><div id="bad-calc"           class="oof-calc"></div></div></div>
+  <div class="locked"><div class="container"><div id="bad-fixed-fallback" class="oof-fixed-with-fallback"></div></div></div>
+
+  <h2>Log</h2>
   <pre id="log"></pre>
 
   <script>
     const logEl = document.getElementById('log');
-    function log(msg) {
-      logEl.textContent += msg + '\n';
-      console.log(msg);
+    function log(line, cls) {
+      const span = document.createElement('span');
+      if (cls) span.className = cls;
+      span.textContent = line + '\n';
+      logEl.appendChild(span);
+      console.log(line);
     }
 
-    function readOOFInsets(label, el) {
-      const cs = getComputedStyle(el);
-      const o = {
-        left: cs.left,
-        top: cs.top,
-        right: cs.right,
-        bottom: cs.bottom,
-        position: cs.position
-      };
-      log(label + ' => ' + JSON.stringify(o));
-    }
-
-    // --- 1) Percent insets on OOF (must use layout-stored insets in classic path) ---
-    (function() {
-      const a = document.createElement('div');
-      a.id = 'abs-pct';
-      a.style.cssText = 'position:absolute;left:10%;top:0;width:20px;height:20px;background:#c00;';
-      document.getElementById('host').appendChild(a);
-      readOOFInsets('1) after append: abs + %', a);
-    })();
-
-    // --- 2) Create, style, append, read in same turn (before rAF) ---
-    (function() {
-      const a = document.createElement('div');
-      a.style.cssText = 'position:absolute;left:20%;top:30px;width:10px;height:10px;background:#0a0;';
-      document.getElementById('host').appendChild(a);
-      readOOFInsets('2) same synchronous turn', a);
-    })();
-
-    // --- 3) display:none container: child still exists in DOM after layout toggles ---
-    (function() {
-      const wrap = document.createElement('div');
-      wrap.style.display = 'none';
-      const a = document.createElement('div');
-      a.style.cssText = 'position:absolute;left:15%;top:5px;width:10px;height:10px;background:#00a;';
-      wrap.appendChild(a);
-      document.body.appendChild(wrap);
-      readOOFInsets('3) child under display:none parent', a);
-      wrap.style.display = 'block';
-      readOOFInsets('3b) after parent display:none -> block', a);
-    })();
-
-    // --- 4) content-visibility (may skip layout for offscreen content in some cases) ---
-    (function() {
-      const cv = document.createElement('div');
-      cv.style.cssText = 'content-visibility:auto;contain-intrinsic-size:100px;position:relative;height:200px;';
-      const a = document.createElement('div');
-      a.style.cssText = 'position:absolute;left:12%;top:0;width:8px;height:8px;background:#a0a;';
-      cv.appendChild(a);
-      document.body.appendChild(cv);
-      readOOFInsets('4) under content-visibility:auto', a);
-    })();
-
-    // --- 5) Next frame and after load ---
-    requestAnimationFrame(function() {
-      const el = document.getElementById('abs-pct');
-      if (el) readOOFInsets('5) rAF: abs + %', el);
-    });
-    window.addEventListener('load', function() {
-      const el = document.getElementById('abs-pct');
-      if (el) readOOFInsets('6) window load: abs + %', el);
-    });
-
-    // --- 6) Stress: many insert/read cycles (uncomment to try heavy repro) ---
-    const STRESS = false;
-    if (STRESS) {
-      const host = document.getElementById('host');
-      for (let i = 0; i < 5000; i++) {
-        const a = document.createElement('div');
-        a.style.cssText = 'position:absolute;left:' + (5 + (i % 30)) + '%;top:1px;width:1px;height:1px;';
-        host.appendChild(a);
-        void getComputedStyle(a).left;
-        host.removeChild(a);
+    function probe(label, id) {
+      const el = document.getElementById(id);
+      if (!el) { log('[' + label + '] missing element #' + id, 'err'); return; }
+      try {
+        const cs = getComputedStyle(el);
+        // Read every inset; ANY of these would crash on the buggy path.
+        const result = {
+          top:    cs.top,
+          right:  cs.right,
+          bottom: cs.bottom,
+          left:   cs.left,
+        };
+        log('[' + label + '] #' + id + ' => ' + JSON.stringify(result), 'ok');
+      } catch (e) {
+        log('[' + label + '] #' + id + ' THREW: ' + e, 'err');
       }
-      log('Stress loop done');
     }
 
-    log('--- done (sync) ---');
+    // Force a full layout pass so the locked subtrees are processed
+    // (and their descendants are deliberately skipped).
+    document.body.offsetTop;
+
+    // Sanity baseline: visible, OOF, percent inset. Should NOT crash.
+    probe('sanity',           'ok-pct');
+
+    // Each of these reads should hit the buggy path:
+    //   box != null, IsOutOfFlowPositioned(), GetLayoutResults().empty().
+    probe('cv-hidden + %',         'bad-pct');
+    probe('cv-hidden + auto',      'bad-auto');
+    probe('cv-hidden + calc()',    'bad-calc');
+    probe('cv-hidden + fixed+try', 'bad-fixed-fallback');
+
+    // Re-probe after a frame in case anything was deferred.
+    requestAnimationFrame(() => {
+      log('--- after rAF ---');
+      probe('rAF cv-hidden + %',      'bad-pct');
+      probe('rAF cv-hidden + auto',   'bad-auto');
+      probe('rAF cv-hidden + calc()', 'bad-calc');
+      probe('rAF cv-hidden + fxd+try','bad-fixed-fallback');
+      log('--- done ---');
+    });
   </script>
 </body>
 </html>
