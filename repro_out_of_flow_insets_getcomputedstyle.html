@@ -244,9 +244,277 @@ requestAnimationFrame(function() {
       var cs = getComputedStyle(el);
       emit('G2 OK — rAF frame 2: top=' + cs.top + ' left=' + cs.left, 'ok');
     });
-    emit('— all patterns done —');
+    emit('— automated groups A–G done —');
   });
 });
+</script>
+
+<!-- ══════════════════════════════════════════════════════════════
+     GROUP H — WhatsApp “Chat settings” style (user report)
+     Opens a fixed overlay + side panel; many nested OOF nodes are
+     created in one synchronous burst, then getComputedStyle is read
+     on every out-of-flow descendant immediately (no explicit layout
+     flush). Matches “new elements generated on the fly” when opening
+     settings in WA Web.
+     ══════════════════════════════════════════════════════════════ -->
+
+<h2>Group H — simulated “Chat settings” (click to open; close overlay)</h2>
+<p style="color:#555; margin-top:0">
+  User report: crash when <strong>WhatsApp chat settings</strong> open — lots of
+  DOM built on the fly. Use the button below; each open builds a fresh subtree,
+  reads <code>top</code>/<code>left</code>/<code>right</code>/<code>bottom</code>/<code>insetInlineStart</code>
+  on every <code>position:absolute|fixed</code> node in the same turn, then removes the UI.
+  Try several times quickly; also try after scrolling the page.
+</p>
+<button type="button" id="btn-open-settings" style="padding:.5rem 1rem; font:inherit; cursor:pointer;">
+  Open chat settings (simulated)
+</button>
+<button type="button" id="btn-open-shadow-settings" style="padding:.5rem 1rem; font:inherit; cursor:pointer; margin-left:.5rem;">
+  Open settings inside Shadow DOM
+</button>
+<script>
+(function() {
+  function readComputedInsetsOnSubtree(root, label) {
+    var all = root.querySelectorAll('*');
+    var n = 0;
+    for (var i = 0; i < all.length; i++) {
+      var el = all[i];
+      var cs = window.getComputedStyle(el);
+      var pos = cs.position;
+      if (pos !== 'absolute' && pos !== 'fixed') continue;
+      n++;
+      // Non-px insets — exercise ValueForPositionOffset → OutOfFlowInsets path
+      void cs.top;
+      void cs.left;
+      void cs.right;
+      void cs.bottom;
+      try { void cs.insetInlineStart; } catch (e) {}
+      try { void cs.insetBlockStart; } catch (e) {}
+    }
+    emit(label + ' — scanned ' + n + ' OOF nodes, no throw', 'ok');
+  }
+
+  function buildSettingsDom() {
+    var overlay = document.createElement('div');
+    overlay.setAttribute('data-wa-settings-overlay', '1');
+    overlay.style.cssText = [
+      'position:fixed', 'inset:0', 'z-index:99998',
+      'display:flex', 'justify-content:flex-end', 'align-items:stretch',
+      'font:14px/1.4 system-ui,sans-serif', 'direction:ltr'
+    ].join(';');
+
+    var backdrop = document.createElement('div');
+    backdrop.style.cssText = 'position:absolute;inset:0;background:rgba(0,0,0,.35);';
+    overlay.appendChild(backdrop);
+
+    var panel = document.createElement('aside');
+    panel.style.cssText = [
+      'position:relative', 'width:min(100%,380px)', 'height:100%', 'max-height:100vh',
+      'background:#f6f6f6', 'box-shadow:-4px 0 16px rgba(0,0,0,.12)',
+      'display:flex', 'flex-direction:column', 'overflow:hidden'
+    ].join(';');
+
+    var header = document.createElement('header');
+    header.style.cssText = 'position:relative;flex:0 0 52px;border-bottom:1px solid #ddd;background:#fff;';
+    var title = document.createElement('div');
+    title.textContent = 'Chat settings';
+    title.style.cssText = 'position:absolute;left:16px;top:50%;transform:translateY(-50%);margin:0;font-weight:600;';
+    var closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.textContent = '×';
+    closeBtn.style.cssText = [
+      'position:absolute', 'top:50%', 'right:10px', 'transform:translateY(-50%)',
+      'width:36px', 'height:36px', 'border:none', 'border-radius:50%',
+      'background:#eee', 'cursor:pointer', 'font-size:22px', 'line-height:1'
+    ].join(';');
+    header.appendChild(title);
+    header.appendChild(closeBtn);
+
+    var tabs = document.createElement('div');
+    tabs.style.cssText = 'position:relative;display:flex;gap:0;border-bottom:1px solid #ddd;background:#fafafa;';
+    var tabNames = ['General', 'Notifications', 'Privacy', 'Chats'];
+    for (var t = 0; t < tabNames.length; t++) {
+      var tab = document.createElement('button');
+      tab.type = 'button';
+      tab.textContent = tabNames[t];
+      tab.style.cssText = [
+        'position:relative', 'flex:1', 'padding:10px 4px', 'border:none',
+        'background:transparent', 'cursor:pointer', 'font:inherit'
+      ].join(';');
+      if (t === 0) {
+        var u = document.createElement('span');
+        u.style.cssText = 'position:absolute;left:8%;right:8%;bottom:0;height:3px;background:#25d366;border-radius:2px;';
+        tab.appendChild(u);
+      }
+      tabs.appendChild(tab);
+    }
+
+    var body = document.createElement('div');
+    body.style.cssText = 'flex:1;overflow:auto;padding:12px;position:relative;';
+
+    for (var r = 0; r < 24; r++) {
+      var row = document.createElement('div');
+      row.style.cssText = [
+        'position:relative', 'min-height:48px', 'padding:8px 8px 8px 52px',
+        'margin-bottom:6px', 'background:#fff', 'border-radius:8px',
+        'border:1px solid #e8e8e8'
+      ].join(';');
+      var icon = document.createElement('span');
+      icon.textContent = '●';
+      icon.style.cssText = [
+        'position:absolute', 'left:12px', 'top:50%', 'transform:translateY(-50%)',
+        'width:32px', 'height:32px', 'line-height:32px', 'text-align:center',
+        'background:#dcf8c6', 'border-radius:50%', 'font-size:14px'
+      ].join(';');
+      var chev = document.createElement('span');
+      chev.textContent = '›';
+      chev.style.cssText = [
+        'position:absolute', 'right:12px', 'top:50%', 'transform:translateY(-50%)',
+        'color:#999', 'font-size:20px'
+      ].join(';');
+      var label = document.createElement('div');
+      label.textContent = 'Setting option ' + (r + 1) + ' — tap to change';
+      label.style.cssText = 'padding-right:28px;';
+      var sub = document.createElement('div');
+      sub.textContent = 'Subtitle with longer text to force wrap in narrow panel';
+      sub.style.cssText = 'font-size:12px;color:#666;margin-top:2px;';
+      row.appendChild(icon);
+      row.appendChild(label);
+      row.appendChild(sub);
+      row.appendChild(chev);
+      body.appendChild(row);
+    }
+
+    var fab = document.createElement('div');
+    fab.textContent = '+';
+    fab.style.cssText = [
+      'position:absolute', 'right:20px', 'bottom:calc(15% + 8px)',
+      'width:48px', 'height:48px', 'border-radius:50%', 'background:#25d366',
+      'color:#fff', 'display:flex', 'align-items:center', 'justify-content:center',
+      'font-size:28px', 'line-height:1', 'box-shadow:0 2px 8px rgba(0,0,0,.2)'
+    ].join(';');
+    body.appendChild(fab);
+
+    panel.appendChild(header);
+    panel.appendChild(tabs);
+    panel.appendChild(body);
+    overlay.appendChild(panel);
+
+    closeBtn.addEventListener('click', function() { overlay.remove(); });
+    backdrop.addEventListener('click', function() { overlay.remove(); });
+    return overlay;
+  }
+
+  document.getElementById('btn-open-settings').addEventListener('click', function() {
+    test('H1 chat settings (sync burst)', function() {
+      var root = buildSettingsDom();
+      document.body.appendChild(root);
+      // Same synchronous turn as WA: layout may not have run for every new box yet
+      readComputedInsetsOnSubtree(root, 'H1');
+      // Optional: microtask read (React useLayoutEffect–like ordering)
+      queueMicrotask(function() {
+        try {
+          readComputedInsetsOnSubtree(root, 'H1b microtask');
+        } catch (e) {
+          emit('H1b microtask — CRASH: ' + e, 'err');
+        }
+      });
+    });
+  });
+
+  document.getElementById('btn-open-shadow-settings').addEventListener('click', function() {
+    test('H2 chat settings in ShadowRoot', function() {
+      var host = document.createElement('div');
+      host.setAttribute('data-wa-settings-host', '1');
+      document.body.appendChild(host);
+      var sr = host.attachShadow({ mode: 'open' });
+      var root = buildSettingsDom();
+      sr.appendChild(root);
+      readComputedInsetsOnSubtree(root, 'H2 shadow');
+      queueMicrotask(function() {
+        try {
+          readComputedInsetsOnSubtree(root, 'H2b shadow microtask');
+        } catch (e) {
+          emit('H2b shadow microtask — CRASH: ' + e, 'err');
+        }
+      });
+      // Remove host after a tick so the page stays usable
+      setTimeout(function() { host.remove(); }, 400);
+    });
+  });
+})();
+</script>
+
+<h2>Group I — burst open/close (stress; simulates fast UI toggling)</h2>
+<button type="button" id="btn-burst-settings" style="padding:.5rem 1rem; font:inherit; cursor:pointer;">
+  Burst: open/close settings 30× (no delay)
+</button>
+<script>
+document.getElementById('btn-burst-settings').addEventListener('click', function() {
+  test('I1 burst 30×', function() {
+    for (var k = 0; k < 30; k++) {
+      var o = document.createElement('div');
+      o.style.cssText = 'position:fixed;inset:0;z-index:' + (99900 + k) + ';pointer-events:none;';
+      var p = document.createElement('div');
+      p.style.cssText = 'position:absolute;top:10%;left:10%;right:10%;bottom:10%;background:#fff;';
+      var x = document.createElement('div');
+      x.style.cssText = 'position:absolute;top:50%;left:50%;width:40px;height:40px;background:red;';
+      p.appendChild(x);
+      o.appendChild(p);
+      document.body.appendChild(o);
+      var cs = window.getComputedStyle(x);
+      void cs.top;
+      void cs.left;
+      void cs.right;
+      o.remove();
+    }
+    emit('I1 OK — burst 30× open/close with immediate getComputedStyle on nested abspos', 'ok');
+  });
+});
+</script>
+
+<h2>Group J — <code>innerHTML</code> + immediate scan (bundled HTML string)</h2>
+<p style="color:#555; margin-top:0">Some apps inject a large HTML string then measure; one synchronous turn.</p>
+<button type="button" id="btn-innerhtml-settings" style="padding:.5rem 1rem; font:inherit; cursor:pointer;">
+  Inject settings HTML via innerHTML + scan OOF
+</button>
+<script>
+(function() {
+  function readComputedInsetsOnSubtree(root) {
+    var all = root.querySelectorAll('*');
+    for (var i = 0; i < all.length; i++) {
+      var el = all[i];
+      var cs = window.getComputedStyle(el);
+      if (cs.position !== 'absolute' && cs.position !== 'fixed') continue;
+      void cs.top; void cs.left; void cs.right; void cs.bottom;
+    }
+  }
+  document.getElementById('btn-innerhtml-settings').addEventListener('click', function() {
+    test('J1 innerHTML settings', function() {
+      var shell = document.createElement('div');
+      shell.style.cssText = 'position:fixed;inset:0;z-index:99950;pointer-events:none;';
+      var html = '';
+      html += '<div style="position:absolute;inset:0;background:rgba(0,0,0,.2)"></div>';
+      html += '<aside style="position:absolute;top:0;right:0;bottom:0;width:min(100%,360px);background:#fff;box-shadow:-2px 0 8px rgba(0,0,0,.15);">';
+      html += '<div style="position:relative;height:48px;border-bottom:1px solid #ddd">';
+      html += '<span style="position:absolute;left:12px;top:50%;transform:translateY(-50%);font-weight:600">Settings</span>';
+      html += '<button type="button" style="position:absolute;top:50%;right:8px;transform:translateY(-50%);width:32px;height:32px;border:none;border-radius:50%;background:#eee">×</button>';
+      html += '</div>';
+      for (var r = 0; r < 20; r++) {
+        html += '<div style="position:relative;margin:8px;padding:8px 8px 8px 44px;background:#fafafa;border-radius:6px;border:1px solid #eee">';
+        html += '<span style="position:absolute;left:10px;top:50%;transform:translateY(-50%);width:28px;height:28px;background:#b8e994;border-radius:50%"></span>';
+        html += '<span style="position:absolute;right:10px;top:50%;transform:translateY(-50%);color:#999">›</span>';
+        html += 'Row ' + r + '</div>';
+      }
+      html += '</aside>';
+      shell.innerHTML = html;
+      document.body.appendChild(shell);
+      readComputedInsetsOnSubtree(shell);
+      emit('J1 OK — innerHTML + OOF scan', 'ok');
+      setTimeout(function() { shell.remove(); }, 300);
+    });
+  });
+})();
 </script>
 
 <!-- ══════════════════════════════════════════════════════════════
@@ -286,13 +554,11 @@ HOW layout_results_ CAN BE EMPTY:
      AppendLayoutResult() is called but its DCHECK is not enforced; in debug builds
      the DCHECK fires instead.
 
-WHATSAPP-SPECIFIC HYPOTHESIS:
-  WhatsApp Web uses position:fixed overlays (top:50%; left:50%) for its loading
-  screen and modal dialogs. These are created/shown via display:none→display:block
-  transitions triggered by JavaScript (React state changes). If getComputedStyle()
-  is called on a newly shown overlay while UpdateStyleForbiddenScope is held (e.g.
-  during CEF's composition tick inside UpdateLifecyclePhases), layout is skipped
-  and the CHECK fires.
+WHATSAPP-SPECIFIC (from user):
+  Crash when <strong>Chat settings</strong> opens — many new nodes in one burst.
+  Group H builds a fixed overlay + sliding panel + rows with nested
+  position:absolute (top:50%, etc.) and immediately scans every OOF node with
+  getComputedStyle. Group I stress-opens a minimal overlay 30× in one click.
 
 TO CONFIRM: a crash stack trace from the unpatched build is needed.
 The relevant frames should show:
