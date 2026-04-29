@@ -2,71 +2,98 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Repro: OOF getComputedStyle vs empty GetLayoutResults</title>
+  <title>Repro: OOF getComputedStyle crash (CEF UpdateStyleForbiddenScope)</title>
   <style>
     body { font: 14px/1.4 system-ui, sans-serif; max-width: 56rem; margin: 1.5rem; }
-    pre  { background: #f4f4f4; padding: 0.75rem; overflow: auto; max-height: 28rem; }
-    .warn { color: #8a4b00; }
+    pre  { background: #f4f4f4; padding: 0.75rem; overflow: auto; max-height: 20rem; }
+    .warn { color: #8a4b00; background: #fff8e1; padding: 0.5rem; border-left: 3px solid #f0a000; }
     .ok   { color: #0a5; }
     .err  { color: #b00; font-weight: 600; }
+    code  { background: #f0f0f0; padding: 0 3px; border-radius: 2px; }
     h2 { font-size: 1rem; margin: 1.2rem 0 0.4rem; }
+    #container { position: relative; width: 300px; height: 200px; border: 1px solid #ccc; background: #fafafa; }
+    #oof-auto   { position: absolute; top: auto; left: auto; width: 40px; height: 40px; background: hotpink; opacity: .7; }
+    #oof-pct    { position: absolute; top: 50%;  left: 50%;  width: 40px; height: 40px; background: deepskyblue; opacity: .7; }
   </style>
 </head>
 <body>
-  <h1>Repro: OOF <code>getComputedStyle</code> insets crash</h1>
-
-  <p>
-    Targets <code>blink::ComputedStyleUtils::ValueForPositionOffset</code>.
-    Without the <code>!box-&gt;GetLayoutResults().empty()</code> guard,
-    <code>OutOfFlowInsetsForGetComputedStyle()</code> is called on a box
-    that has never been laid out, hitting <code>CHECK(!layout_results.empty())</code>.
-  </p>
+  <h1>Repro: OOF <code>getComputedStyle</code> crash</h1>
 
   <p class="warn">
-    The two conditions needed to crash:
-    <ol>
-      <li>The OOF element's inset is <strong>not</strong> a fixed length (so the early
-          <code>if (offset.IsFixed() &amp;&amp; !MayHavePositionFallbackList())</code>
-          short-circuit does NOT fire). Use <code>top: auto</code>, <code>%</code>,
-          or <code>calc()</code>.</li>
-      <li>The OOF box has <strong>never been laid out</strong>, so
-          <code>GetLayoutResults()</code> is empty. This happens in the multicol /
-          fragmented-container scenario (bug 1473508) and in the inline-script-before-
-          first-layout scenario below.</li>
-    </ol>
+    <strong>This crash requires the CEF-specific
+    <code>UpdateStyleForbiddenScope</code> to be active.</strong>
+    It cannot be reproduced by opening this page in a plain browser.
+    Load this page inside the CEF 6367 build (without the fix) while the
+    composition tick is running — i.e. after the page is registered with the
+    layout tree but before the first paint has committed.
   </p>
 
-  <h2>Log</h2>
-  <pre id="log"></pre>
+  <h2>Root cause</h2>
+  <p>
+    CEF's <code>LayoutTreeScheduler::OnCompositionStarted()</code>
+    (<code>layout_tree_scheduler.cc:187</code>) enters
+    <code>UpdateStyleForbiddenScope</code>, which patches
+    <code>Document::UpdateStyleAndLayout()</code> to return early:
+  </p>
+  <pre>// document.cc (patched by CEF)
+void Document::UpdateStyleAndLayout(DocumentUpdateReason reason) {
+  ...
+  if (UpdateStyleForbiddenScope::IsUpdateStyleForbidden())
+    return;          // ← layout never runs inside a composition tick
+  ...</pre>
+  <p>
+    When page JS calls <code>getComputedStyle(el).top</code> on an
+    out-of-flow–positioned element while a composition tick is in progress
+    (e.g. from a <code>MutationObserver</code>, a layout-tree event callback,
+    or simply an element inserted just before a tick fires), the call chain is:
+  </p>
+  <pre>getComputedStyle(el).top
+  → CSSComputedStyleDeclaration::GetPropertyCSSValue("top")
+    → UpdateStyleAndLayoutIfNeeded()         // IsLayoutDependent → true
+      → Document::UpdateStyleAndLayoutForNode()
+        → Document::UpdateStyleAndLayout()
+          → <strong>returns early (UpdateStyleForbiddenScope)</strong>
+    → Bottom/Top::CSSValueFromComputedStyleInternal()
+      → ComputedStyleUtils::ValueForPositionOffset()
+        // offset is 'auto' or '%' → IsFixed() is false → no early-return at line 807
+        if (box && box->IsOutOfFlowPositioned())  // ← TRUE (element is abspos)
+          box->OutOfFlowInsetsForGetComputedStyle()
+            CHECK(!layout_results.empty())  // ← CRASH: box never laid out</pre>
 
-  <!-- ═══════════════════════════════════════════════════════════════════
-       CASE 1 — Modelled on WPT getComputedStyle-insets-multicol-absolute-crash
-       (crbug.com/1473508).
+  <h2>Trigger conditions (both required)</h2>
+  <ol>
+    <li>
+      <strong>UpdateStyleForbiddenScope is held</strong> — happens inside CEF's
+      composition tick (<code>LayoutTreeScheduler::OnCompositionStarted</code>),
+      <code>VRMHelper::GetElementLeftAndTop</code>,
+      <code>BlinkHelper::GetElementPositionFromViewPortById</code>, and several
+      other CEF helpers.
+    </li>
+    <li>
+      <strong>OOF element has non-fixed inset</strong> — <code>top: auto</code>,
+      <code>top: 50%</code>, <code>top: calc(...)</code>, etc. A fixed value
+      like <code>top: 10px</code> takes an early-return at line 807 and never
+      reaches <code>OutOfFlowInsetsForGetComputedStyle()</code>.
+    </li>
+  </ol>
 
-       An absolutely-positioned multicol container with no explicit right/bottom.
-       The absolutely-positioned <ruby> inside is the thing that causes OOF layout
-       to be deferred; getComputedStyle on the *outer* abspos element fires while
-       the outer element itself may not yet have been committed to layout_results_.
-       ═══════════════════════════════════════════════════════════════════ -->
-  <style>
-    html { column-count: 2; }
-    body { transform: scale(1); }
-    #multicol-abspos {
-      column-count: 2;
-      position: absolute;
-      /* No explicit right/bottom → they are 'auto', bypasses IsFixed() guard */
-    }
-  </style>
+  <h2>Minimal page content that triggers the crash</h2>
+  <p>
+    Any page that has an absolutely-positioned element with a non-fixed
+    <code>top</code>/<code>left</code> and calls <code>getComputedStyle</code>
+    on it (directly or via a framework) during a composition tick.
+    The element just needs to exist — it doesn't matter if it was inserted
+    before or after the last paint.
+  </p>
 
-  <div id="multicol-abspos">
-    <svg xmlns="http://www.w3.org/2000/svg"></svg>
-    <div style="transform: scale(1)">
-      <ruby style="position: absolute"><rt>foo</rt></ruby>
-    </div>
+  <div id="container">
+    <div id="oof-auto">auto</div>
+    <div id="oof-pct">50%</div>
   </div>
-  <!-- Inline script: runs during HTML parse, before first layout. -->
+
+  <h2>Live probe (safe in plain browser — layout is NOT forbidden here)</h2>
+  <pre id="log"></pre>
   <script>
-  (function () {
     var log = document.getElementById('log');
     function emit(msg, cls) {
       var s = document.createElement('span');
@@ -74,123 +101,44 @@
       s.textContent = msg + '\n';
       log.appendChild(s);
     }
+
+    // In a plain browser this will succeed because UpdateStyleAndLayout runs normally.
+    // In CEF with UpdateStyleForbiddenScope held, the layout is skipped and
+    // GetLayoutResults() is empty → crash in the unpatched build.
     try {
-      var v = getComputedStyle(document.getElementById('multicol-abspos')).right;
-      emit('[case 1 – multicol abspos .right] => ' + v, 'ok');
+      var cs1 = getComputedStyle(document.getElementById('oof-auto'));
+      emit('[oof-auto] top=' + cs1.top + ' left=' + cs1.left, 'ok');
     } catch(e) {
-      emit('[case 1 – multicol abspos .right] THREW: ' + e, 'err');
+      emit('[oof-auto] THREW: ' + e, 'err');
     }
-  }());
-  </script>
 
-  <!-- ═══════════════════════════════════════════════════════════════════
-       CASE 2 — Inline-script reads before first layout.
-
-       Each <div> is inserted by the HTML parser; the immediately-following
-       <script> runs before layout has ever happened for that element.
-       'top: auto' means IsFixed() is false → no early return → reaches
-       OutOfFlowInsetsForGetComputedStyle() with empty layout_results_.
-       ═══════════════════════════════════════════════════════════════════ -->
-  <div id="case2a" style="position:absolute; top:auto; left:auto;"></div>
-  <script>
-  (function () {
-    var log = document.getElementById('log');
-    function emit(msg, cls) {
-      var s = document.createElement('span');
-      if (cls) s.className = cls;
-      s.textContent = msg + '\n';
-      log.appendChild(s);
-    }
     try {
-      var cs = getComputedStyle(document.getElementById('case2a'));
-      emit('[case 2a – auto insets, inline script] top=' + cs.top + ' left=' + cs.left, 'ok');
+      var cs2 = getComputedStyle(document.getElementById('oof-pct'));
+      emit('[oof-pct] top=' + cs2.top + ' left=' + cs2.left, 'ok');
     } catch(e) {
-      emit('[case 2a – auto insets, inline script] THREW: ' + e, 'err');
-    }
-  }());
-  </script>
-
-  <div id="case2b" style="position:absolute; top:50%; left:50%;"></div>
-  <script>
-  (function () {
-    var log = document.getElementById('log');
-    function emit(msg, cls) {
-      var s = document.createElement('span');
-      if (cls) s.className = cls;
-      s.textContent = msg + '\n';
-      log.appendChild(s);
-    }
-    try {
-      var cs = getComputedStyle(document.getElementById('case2b'));
-      emit('[case 2b – % insets, inline script] top=' + cs.top + ' left=' + cs.left, 'ok');
-    } catch(e) {
-      emit('[case 2b – % insets, inline script] THREW: ' + e, 'err');
-    }
-  }());
-  </script>
-
-  <div id="case2c" style="position:absolute; top:calc(10px + 5%); left:0;"></div>
-  <script>
-  (function () {
-    var log = document.getElementById('log');
-    function emit(msg, cls) {
-      var s = document.createElement('span');
-      if (cls) s.className = cls;
-      s.textContent = msg + '\n';
-      log.appendChild(s);
-    }
-    try {
-      var cs = getComputedStyle(document.getElementById('case2c'));
-      emit('[case 2c – calc() inset, inline script] top=' + cs.top, 'ok');
-    } catch(e) {
-      emit('[case 2c – calc() inset, inline script] THREW: ' + e, 'err');
-    }
-  }());
-  </script>
-
-  <!-- ═══════════════════════════════════════════════════════════════════
-       CASE 3 — DOM insertion + immediate getComputedStyle (post-load).
-       Same idea as case 2 but driven by JS after page load, exercising
-       the "element inserted but layout not yet run" window.
-       ═══════════════════════════════════════════════════════════════════ -->
-  <script>
-  window.addEventListener('DOMContentLoaded', function () {
-    var log = document.getElementById('log');
-    function emit(msg, cls) {
-      var s = document.createElement('span');
-      if (cls) s.className = cls;
-      s.textContent = msg + '\n';
-      log.appendChild(s);
+      emit('[oof-pct] THREW: ' + e, 'err');
     }
 
-    // Insert and immediately query — no layout flush in between.
+    // Simulate what happens when the layout is suppressed:
+    // Insert a new OOF element and immediately read its computed top
+    // without any layout flush. In a plain browser UpdateStyleAndLayout
+    // *will* run so this won't crash. But it demonstrates the code path.
     var rel = document.createElement('div');
-    rel.style.cssText = 'position:relative; width:300px; height:300px;';
+    rel.style.cssText = 'position:relative;width:300px;height:200px;';
     document.body.appendChild(rel);
 
-    var oof = document.createElement('div');
-    oof.style.cssText = 'position:absolute; top:auto; left:auto; width:30px; height:30px;';
-    rel.appendChild(oof);
+    var fresh = document.createElement('div');
+    fresh.style.cssText = 'position:absolute;top:50%;left:50%;width:40px;height:40px;background:orange;';
+    rel.appendChild(fresh);
 
     try {
-      var cs = getComputedStyle(oof);
-      emit('[case 3 – JS insert, no flush, auto insets] top=' + cs.top + ' left=' + cs.left, 'ok');
+      var cs3 = getComputedStyle(fresh);
+      emit('[fresh oof, % insets] top=' + cs3.top + ' left=' + cs3.left, 'ok');
     } catch(e) {
-      emit('[case 3 – JS insert, no flush, auto insets] THREW: ' + e, 'err');
+      emit('[fresh oof, % insets] THREW: ' + e, 'err');
     }
 
-    var oof2 = document.createElement('div');
-    oof2.style.cssText = 'position:absolute; top:50%; left:50%; width:30px; height:30px;';
-    rel.appendChild(oof2);
-    try {
-      var cs2 = getComputedStyle(oof2);
-      emit('[case 3b – JS insert, no flush, % insets] top=' + cs2.top + ' left=' + cs2.left, 'ok');
-    } catch(e) {
-      emit('[case 3b – JS insert, no flush, % insets] THREW: ' + e, 'err');
-    }
-
-    emit('--- done ---');
-  });
+    emit('Done — no crash in plain browser (layout runs normally here).');
   </script>
 </body>
 </html>
