@@ -1,0 +1,13 @@
+<!doctype html>
+<html>
+<head><title>Iframe print test - single file version</title></head>
+<body>
+  <h1>Outer page (top-level, does NOT call print itself)</h1>
+  <p>Don't use Ctrl+P here - that targets the main frame, not the iframe below.
+     Click the button INSIDE the red-bordered iframe instead.</p>
+
+  <iframe style="width:600px; height:250px; border:3px solid red;"
+    srcdoc="&lt;h2&gt;Inner iframe&lt;/h2&gt;&lt;p&gt;This button calls window.print() from inside this iframe's own context.&lt;/p&gt;&lt;button onclick=&quot;window.print()&quot;&gt;Print this iframe&lt;/button&gt;">
+  </iframe>
+</body>
+</html>
